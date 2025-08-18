@@ -334,3 +334,108 @@ def test_next_pending_after_nonexistent_before_first(db_path):
 def test_next_pending_skips_non_pending(db_path):
     res = srv.next_pending.fn(db_path, column="status", after_key="task:2")
     assert res["key"] == "task:4"
+
+
+# --- delete_record tests ---
+
+
+def test_delete_record_existing(db_path):
+    res = srv.delete_record.fn(db_path, "task:1")
+    assert res["deleted"] is True and srv.get_row.fn(db_path, "task:1")["value"] is None
+
+
+def test_delete_record_missing(db_path):
+    res = srv.delete_record.fn(db_path, "missing")
+    assert res["deleted"] is False
+
+
+def test_delete_record_bytes_key_raises(db_path):
+    with pytest.raises(AttributeError):
+        srv.delete_record.fn(db_path, b"task:1")  # type: ignore[arg-type]
+
+
+# --- bulk_insert tests ---
+
+
+def test_bulk_insert_adds_records(db_path):
+    records = {
+        "task:9": {"id": 9, "status": 0},
+        "task:10": {"id": 10, "status": 1},
+    }
+    res = srv.bulk_insert.fn(db_path, records)
+    assert res["inserted"] == 2 and srv.get_row.fn(db_path, "task:10")["value"]["id"] == 10
+
+
+def test_bulk_insert_skips_existing(db_path):
+    res = srv.bulk_insert.fn(db_path, {"task:1": {"id": 1}, "task:11": {"id": 11}})
+    assert res["inserted"] == 1 and srv.get_row.fn(db_path, "task:11")["value"]["id"] == 11
+
+
+def test_bulk_insert_non_serializable(db_path):
+    with pytest.raises(TypeError):
+        srv.bulk_insert.fn(db_path, {"task:12": {"obj": object()}})
+
+
+# --- increment_field tests ---
+
+
+def test_increment_field_existing(db_path):
+    res = srv.increment_field.fn(db_path, "task:1", "status")
+    assert res["updated"] is True and res["value"] == 2
+
+
+def test_increment_field_missing_field(db_path):
+    res = srv.increment_field.fn(db_path, "task:1", "counter", amount=3)
+    assert res["updated"] is True and res["value"] == 3
+
+
+def test_increment_field_non_numeric(db_path):
+    srv.set_value.fn(db_path, "task:1", "status", "done")
+    res = srv.increment_field.fn(db_path, "task:1", "status")
+    assert res["updated"] is False
+
+
+def test_increment_field_missing_key(db_path):
+    res = srv.increment_field.fn(db_path, "missing", "count")
+    assert res["updated"] is False
+
+
+def test_increment_field_bytes_key_raises(db_path):
+    with pytest.raises(AttributeError):
+        srv.increment_field.fn(db_path, b"task:1", "status")  # type: ignore[arg-type]
+
+
+def test_increment_field_invalid_json(invalid_json_db_path):
+    with pytest.raises(json.JSONDecodeError):
+        srv.increment_field.fn(invalid_json_db_path, "bad", "status")
+
+
+# --- scan_range tests ---
+
+
+def test_scan_range_keys(db_path):
+    res = srv.scan_range.fn(db_path, "task:2", "task:4")
+    assert res["results"] == ["task:2", "task:3", "task:4"]
+
+
+def test_scan_range_with_values(db_path):
+    res = srv.scan_range.fn(db_path, "task:2", "task:3", include_values=True)
+    assert res["results"][0]["key"] == "task:2" and res["results"][1]["value"]["id"] == 3
+
+
+def test_scan_range_start_after_end(db_path):
+    res = srv.scan_range.fn(db_path, "task:5", "task:2")
+    assert res["results"] == []
+
+
+# --- backup_database tests ---
+
+
+def test_backup_database_creates_copy(db_path, tmp_path):
+    backup = tmp_path / "backupdb"
+    res = srv.backup_database.fn(db_path, str(backup))
+    assert pathlib.Path(res["backup_path"]).exists()
+    env = lmdb.open(str(backup), max_dbs=1, map_size=10485760)
+    with env.begin() as txn:
+        val = json.loads(txn.get(b"task:1"))
+    assert val["id"] == 1

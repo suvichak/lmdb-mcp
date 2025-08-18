@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Any, Optional
 
 import lmdb
@@ -190,6 +191,130 @@ def set_columns(db_path: str, key: str, updates: dict) -> dict:
         data.update(updates)
         txn.put(key.encode(), json.dumps(data).encode())
     return {"updated": True}
+
+
+@server.tool()
+def delete_record(db_path: str, key: str) -> dict:
+    """Delete a record from the database.
+
+    Args:
+        db_path: Path to the LMDB environment.
+        key: Key for the record to delete.
+
+    Returns:
+        Mapping indicating whether the record was deleted.
+    """
+    env = _open_env(db_path, readonly=False)
+    with env.begin(write=True) as txn:
+        deleted = txn.delete(key.encode())
+    return {"deleted": deleted}
+
+
+@server.tool()
+def bulk_insert(db_path: str, records: dict[str, dict]) -> dict:
+    """Insert multiple key/value pairs in one transaction.
+
+    Args:
+        db_path: Path to the LMDB environment.
+        records: Mapping of keys to JSON objects.
+
+    Returns:
+        Mapping with count of inserted records.
+    """
+    env = _open_env(db_path, readonly=False)
+    inserted = 0
+    with env.begin(write=True) as txn:
+        for key, value in records.items():
+            if txn.get(key.encode()) is not None:
+                continue
+            txn.put(key.encode(), json.dumps(value).encode())
+            inserted += 1
+    return {"inserted": inserted}
+
+
+@server.tool()
+def increment_field(
+    db_path: str,
+    key: str,
+    field: str,
+    amount: int = 1,
+) -> dict:
+    """Atomically increment a numeric field in a JSON record.
+
+    Args:
+        db_path: Path to the LMDB environment.
+        key: Row identifier to update.
+        field: JSON key to increment.
+        amount: Amount to add to the field (default 1).
+
+    Returns:
+        Mapping indicating whether the row was updated and the new value.
+    """
+    env = _open_env(db_path, readonly=False)
+    with env.begin(write=True) as txn:
+        raw = txn.get(key.encode())
+        if raw is None:
+            return {"updated": False, "error": "key not found"}
+        data = json.loads(raw)
+        current = data.get(field, 0)
+        if not isinstance(current, (int, float)):
+            return {"updated": False, "error": "field not numeric"}
+        data[field] = current + amount
+        txn.put(key.encode(), json.dumps(data).encode())
+    return {"updated": True, "value": current + amount}
+
+
+@server.tool()
+def scan_range(
+    db_path: str,
+    start_key: str,
+    end_key: str,
+    include_values: bool = False,
+) -> dict:
+    """Retrieve keys (and optional values) between two endpoints.
+
+    Args:
+        db_path: Path to the LMDB environment.
+        start_key: Starting key for the scan (inclusive).
+        end_key: Ending key for the scan (inclusive).
+        include_values: Whether to include JSON values in results.
+
+    Returns:
+        Mapping with "results" list of keys or key/value mappings.
+    """
+    env = _open_env(db_path)
+    results = []
+    with env.begin() as txn:
+        cursor = txn.cursor()
+        found = cursor.set_range(start_key.encode())
+        while found:
+            key = cursor.key().decode()
+            if key > end_key:
+                break
+            if include_values:
+                data = json.loads(cursor.value())
+                results.append({"key": key, "value": data})
+            else:
+                results.append(key)
+            found = cursor.next()
+    return {"results": results}
+
+
+@server.tool()
+def backup_database(db_path: str, backup_path: str) -> dict:
+    """Backup the entire LMDB environment to a new location.
+
+    Args:
+        db_path: Path to the source LMDB environment.
+        backup_path: Destination directory for the backup.
+
+    Returns:
+        Mapping with the path to the backup.
+    """
+    os.makedirs(backup_path, exist_ok=True)
+    env = _open_env(db_path)
+    env.copy(backup_path)
+    return {"backup_path": backup_path}
 
 
 @server.tool()
